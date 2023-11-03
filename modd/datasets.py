@@ -3,7 +3,7 @@ import mne, re
 from torch.utils.data import Dataset
 
 class EegDatasetBase(Dataset):
-    def __init__(self, transform=None, window_size=256, step=128):
+    def __init__(self, transform=None, window_size=256, step=256):
         super().__init__()
         self.transform = transform
         self.labels = pd.read_csv('../data/labels.csv')
@@ -29,7 +29,7 @@ class EegDatasetBase(Dataset):
         sample, label, _, _ = self.item(idx)
         if self.transform:
             sample = self.transform(sample)
-        segments = [sample[:, i:i + self.window_size] for i in range(0, sample.shape[1] - self.window_size + 1, self.step)]
+        segments = np.array([sample[:, i:i + self.window_size] for i in range(0, sample.shape[1] - self.window_size + 1, self.step)])
         return segments, label
     
     def plot(self, idx, save_svg=False):
@@ -80,8 +80,27 @@ class EegDatasetNominal(EegDatasetBase):
     def __init__(self, transform=None):
         super().__init__(transform)
         # Eliminar columnas donde exista un 1 (solo dejar si hay 0s o NaNs)
-        self.labels = self.labels.loc[:, (self.labels != 1).all(axis=0)]
+        self.columns = self.labels.loc[:, (self.labels != 1).all(axis=0)].columns
     
-    def item(self, idx):
-        idx = int(self.labels.columns[idx])-1
+    def my_item(self, idx): # Cambio de nombre por problemas del hook con la clase base
+        idx = int(self.columns[idx])-1
         return super().item(idx)
+    
+    def __getitem__(self, idx):
+        idx = int(self.columns[idx])-1
+        return super().__getitem__(idx)
+    
+    def __len__(self):
+        return len(self.columns)
+    
+class TransformerDataset(EegDataset):
+    def __init__(self, transform=None, window_size=256, step=256):
+        super().__init__(transform, window_size, step)
+    
+    def __getitem__(self, idx):
+        segments, label = super().__getitem__(idx)
+        # (batch, n_channels, n_steps_in)
+        segments = segments.transpose(1, 0, 2)
+        # (batch, n_channels, n_steps_out)
+        label = label.reshape(1, -1, 1)
+        return segments, label

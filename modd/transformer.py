@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-# Crear modelo autoregresivo (batch, n_channels, n_steps_in) -> (batch, n_channels, n_steps_out)
+# Modelo autoregresivo (batch, n_channels, n_steps_in) -> (batch, n_channels, n_steps_out)
 # - para predecir a n_steps pasos basado en transformer
 # - con n_channels=21 de entrada, 21 series de tiempo
 # - Largo de ventana de entrada máximo de 256 hz * 60s y mínimo de 256 hz * 1s
@@ -15,9 +15,9 @@ class AutoregressiveTransformer(pl.LightningModule):
         self.n_layers = n_layers
         self.max_win_size = max_win_size
         self.dropout = dropout
-        
-        encoder_layer = nn.TransformerEncoderLayer(d_model=n_channels, nhead=n_heads, dropout=dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers, norm=nn.LayerNorm(n_channels))
+        self.pos_encoder = nn.TransformerEncoderLayer(d_model=n_channels, nhead=n_heads, dropout=dropout, batch_first=True)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=n_channels, nhead=n_heads, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=n_layers, norm=nn.LayerNorm(n_channels))
         self.linear = nn.Linear(n_channels, n_channels)
         
     def forward(self, x):
