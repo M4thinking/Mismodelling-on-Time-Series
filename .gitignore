@@ -166,3 +166,4 @@ References/
 *.zip
 *.pdf
 requirements.txt
+transformer_data/
