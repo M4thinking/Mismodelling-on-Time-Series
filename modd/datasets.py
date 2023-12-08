@@ -1,12 +1,20 @@
 import pandas as pd, numpy as np, matplotlib.pyplot as plt
-import mne, re
-from torch.utils.data import Dataset
+import mne, re, os, warnings
+from torch.utils.data import Dataset, DataLoader, random_split
+from torchvision import transforms
+from torch import Generator, from_numpy
+import pytorch_lightning as pl
+import tqdm, joblib
+from sklearn.preprocessing import RobustScaler
+import pickle
+
+data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
 
 class EegDatasetBase(Dataset):
-    def __init__(self, transform=None, window_size=256, step=256):
+    def __init__(self, transform=None, window_size=100, step=25):
         super().__init__()
         self.transform = transform
-        self.labels = pd.read_csv('../data/labels.csv')
+        self.labels = pd.read_csv(os.path.join(data_path, 'labels.csv'))
         self.window_size = window_size
         self.step = step
         
@@ -14,8 +22,18 @@ class EegDatasetBase(Dataset):
         return len(self.labels.columns)
     
     def item(self, idx):
-        raw_file = f'../data/eeg{idx+1}.edf'
-        raw = mne.io.read_raw_edf(raw_file, preload=True, verbose=False)
+        # raw_file = f'../data/eeg{idx+1}.edf'
+        raw_file = os.path.join(data_path, f'eeg{idx+1}.edf')
+        with warnings.catch_warnings(): # Ignore warnings
+            warnings.simplefilter("ignore")
+            raw = mne.io.read_raw_edf(raw_file, preload=True, verbose=False)
+
+        # --- FILTRADO ---
+        notch_frequencies = [50, 100]
+        raw.notch_filter(freqs = notch_frequencies, verbose = False)
+        raw.filter(1, 50, fir_design = 'firwin', verbose = False)
+        raw.resample(sfreq = 100)
+        # ----------------
         data = raw.get_data()
         names = map(str.upper, raw.ch_names)
         names = [n + "-REF" if not re.search("-REF", n) else n for n in names]
@@ -29,8 +47,10 @@ class EegDatasetBase(Dataset):
         sample, label, _, _ = self.item(idx)
         if self.transform:
             sample = self.transform(sample)
-        segments = np.array([sample[:, i:i + self.window_size] for i in range(0, sample.shape[1] - self.window_size + 1, self.step)])
-        return segments, label
+        return sample[0], label
+        # segments = np.array([sample[:, i:i + self.window_size] for i in range(0, sample.shape[1] - self.window_size + 1, self.step)])
+        # print("segments.shape2", segments.shape)
+        # return segments, label
     
     def plot(self, idx, save_svg=False):
         sample, label, names, real_idx = self.item(idx)
@@ -48,11 +68,11 @@ class EegDatasetBase(Dataset):
 
         for i, detection in enumerate(detections):
             if detection == 1:
-                axs[-1].axvline(x=256 * i, color='red', linewidth=0.1)
-                axs[-1].axvline(x=256 * (i + 1), color='red', linewidth=0.1)
+                axs[-1].axvline(x=self.window_size * i, color='red', linewidth=0.1)
+                axs[-1].axvline(x=self.window_size * (i + 1), color='red', linewidth=0.1)
 
-        axs[-1].set_xticks(np.arange(0, len(sample[0]), 256 * 60 * 10))
-        axs[-1].set_xticklabels(np.arange(0, len(sample[0]) // (256 * 60) + 1, 10))
+        axs[-1].set_xticks(np.arange(0, len(sample[0]), self.window_size * 60 * 10))
+        axs[-1].set_xticklabels(np.arange(0, len(sample[0]) // (self.window_size * 60) + 1, 10))
 
         axs[10].text(-0.06, 0.2, 'Voltaje ($\mu V$)',
                      horizontalalignment='center',
@@ -92,15 +112,195 @@ class EegDatasetNominal(EegDatasetBase):
     
     def __len__(self):
         return len(self.columns)
-    
-class TransformerDataset(EegDataset):
-    def __init__(self, transform=None, window_size=256, step=256):
-        super().__init__(transform, window_size, step)
+
+class TransformerDataset(Dataset):
+    # Chunk de datos de tamaño in_size, con step de tamaño step
+    def __init__(self, data, in_size=256, out_size=64, step=64, type='train'):
+        super().__init__()
+        self.in_size = in_size
+        self.out_size = out_size
+        self.step = step
+        self.data = data # (N, 21, len_data)
+        self.type = type
+        self.X = None
+        self.Y = None
+        self.pwd = os.path.dirname(os.path.abspath(__file__))
+        
+    def fit_scaler(self):
+        scaler = RobustScaler()
+        min_len = np.min([sample.shape[1] for sample, _ in self.data])
+        data = np.concatenate([sample[:, :min_len] for sample, _ in self.data], axis=1)
+        scaler.fit(data.T)
+        joblib.dump(scaler, os.path.join(self.pwd, 'scaler.pkl'))
+        
+    def setup(self, force = False):
+        # Data path
+        path = 'data'
+        self.data_path = os.path.join(self.pwd, path)
+        # Crear carpeta data si no existe
+        if not os.path.exists(self.data_path):
+            os.mkdir(self.data_path)
+        self.len = 0
+        # Si se fuerza o el data_path esta vacio o no existe
+        if force or not os.path.exists(self.data_path) or len(os.listdir(os.path.join(self.data_path, self.type))) == 0:
+            # Borrar datos en data/{train, val, test}
+            if os.path.exists(os.path.join(self.data_path, self.type)):
+                for f in os.listdir(os.path.join(self.data_path, self.type)):
+                    os.remove(os.path.join(self.data_path, self.type, f))
+            
+            if not os.path.exists(os.path.join(self.data_path, self.type)):
+                os.mkdir(os.path.join(self.data_path, self.type))
+                
+            scaler = joblib.load(os.path.join(self.pwd, 'scaler.pkl'))
+            idx = 0
+            for sample, _ in tqdm.tqdm(self.data):
+                sample = scaler.transform(sample.T).T # Escaler permite pre filtrar outliers
+                for i in range(0, sample.shape[1] - self.in_size - self.out_size + 1, self.step):
+                    sx = sample[:, i:i + self.in_size].astype('float32')
+                    sy = sample[:, i + self.in_size:i + self.in_size + self.out_size].astype('float32')
+                    if sx.var(axis=0).mean() < 0.01 or sy.var(axis=0).mean() < 0.01: continue
+                    s = np.concatenate([sx, sy], axis=1)
+                    mean = np.mean(s, axis=1)
+                    std = np.std(s, axis=1)
+                    sx = from_numpy( (sx - mean[:, None]) / std[:, None] ).float().T
+                    sy = from_numpy( (sy - mean[:, None]) / std[:, None] ).float().T
+                    # Guardar en un pickle (en una carpeta data/{train, val, test})
+                    with open(os.path.join(self.data_path, self.type, f'{idx}.pkl'), 'wb') as file:
+                        pickle.dump((sx, sy), file)
+                    self.len += 1
+                    idx += 1
+        else:
+            self.len = len(os.listdir(os.path.join(self.data_path, self.type)))
+        
+    def __len__(self):
+        return self.len
     
     def __getitem__(self, idx):
-        segments, label = super().__getitem__(idx)
-        # (batch, n_channels, n_steps_in)
-        segments = segments.transpose(1, 0, 2)
-        # (batch, n_channels, n_steps_out)
-        label = label.reshape(1, -1, 1)
-        return segments, label
+        # Cargar el pickle
+        with open(os.path.join(self.data_path, self.type, f'{idx}.pkl'), 'rb') as file:
+            sx, sy = pickle.load(file)
+        return sx, sy
+        
+    
+class EegDataModule(pl.LightningDataModule):
+    def __init__(self, batch_size=32, in_size=256, out_size=64, step=64, partition=[25, 4, 4]):
+        super().__init__()
+        self.save_hyperparameters()
+        self.batch_size = batch_size
+        self.in_size = in_size
+        self.out_size = out_size
+        self.step = step
+        self.pwd = os.path.dirname(os.path.abspath(__file__))
+        self.partition = partition
+        
+    def setup(self, stage: str = None, force = False, force_scaler=False):
+        transform =  transforms.Compose([transforms.ToTensor()])
+        data = EegDatasetNominal(transform)
+        train_data, val_data, test_data = random_split(data, self.partition, generator=Generator().manual_seed(42))
+        # print('Train:', len(train_data), 'Val:', len(val_data), 'Test:', len(test_data))
+        
+        self.train_dataset = TransformerDataset(train_data, self.in_size, self.out_size, self.step, 'train')
+        if not os.path.exists(os.path.join(self.pwd, 'scaler.pkl')) or force_scaler: self.train_dataset.fit_scaler()
+        self.train_dataset.setup(force);
+        # print('Train chunks:', len(self.train_dataset))
+        
+        self.val_dataset = TransformerDataset(val_data, self.in_size, self.out_size, self.step, 'val')
+        self.val_dataset.setup(force); 
+        # print('Val chunks:', len(self.val_dataset))
+        
+        self.test_dataset = TransformerDataset(test_data, self.in_size, self.out_size, self.step, 'test')
+        self.test_dataset.setup(force)
+        # print('Test chunks:', len(self.test_dataset))
+        
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
+    
+    def test_dataloader(self):
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
+    
+if __name__ == '__main__':
+    data = EegDataModule(batch_size=32, in_size=100, out_size=25, step=25, partition=[25, 4, 4])
+    # # Force para recalcular los datasets y el scaler
+    data.setup(force=True, force_scaler=False)
+    # Graficar un ejemplo
+    example = data.train_dataset[0]
+    print(example[0].shape, example[1].shape)
+    fig, axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
+    flat_axs = axs.flatten()
+    input = example[0].numpy()
+    output = example[1].numpy()
+    mean = np.mean(np.concatenate([input, output]), axis=0)
+    std = np.std(np.concatenate([input, output]), axis=0)
+    normalized = (np.concatenate([input, output]) - mean) / std
+    input = normalized[:100]
+    output = normalized[100:]
+    
+    for i in range(21):
+        flat_axs[i].plot(np.arange(0, 100), input[:, i], label='Input')
+        flat_axs[i].plot(np.arange(100, 125), output[:, i], label='Target')
+        flat_axs[i].set_ylim([-3, 3])
+        flat_axs[i].legend(fontsize=6)
+        flat_axs[i].set_title(f'Channel {i}', fontsize=6)
+    plt.show()
+    
+    
+    
+    
+    
+    
+    # # Revisar rango de cada canal en el dataset de entrenamiento
+    # transform =  transforms.Compose([transforms.ToTensor()])
+    # data_nominal = EegDatasetNominal(transform)
+    # min_len = np.min([sample.shape[1] for sample, _ in data_nominal]) 
+    
+    # data_scaled = []
+    # diffs = []
+    # for sample, _ in data_nominal:
+    #     # from torch to numpy
+    #     sample = sample.numpy()
+    #     # Borrar columnas donde exista un 0
+    #     print("Cantidad de columnas borradas:", np.sum((sample == 0).all(axis=0)))
+    #     # Encontrar segmentos constantes
+        
+    #     sample = sample[:, (sample != 0).any(axis=0)]
+    #     mean = np.mean(sample, axis=1)
+    #     std = np.std(sample, axis=1)
+    #     diff = np.diff(sample, axis=1)
+    #     diffs.append(diff)
+    #     normalized = (sample - mean[:, None]) / std[:, None]
+    #     normalized = normalized[:, :min_len]
+    #     data_scaled.append(normalized)
+    # diffs = np.concatenate(diffs, axis=0)
+    # data = np.stack(data_scaled, axis=0)
+    # assert data.shape == (33, 21, min_len)
+    # # Graficar los 21 canales con su rango de valores
+    # mean_max_min = False
+    # if mean_max_min:
+    #     min_curve = np.min(data, axis=0)
+    #     max_curve = np.max(data, axis=0)
+    #     mean = np.mean(data, axis=0)
+    #     fig, axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
+    #     flat_axs = axs.flatten()
+    #     for i in range(21):
+    #         flat_axs[i].plot(np.arange(0, min_len), mean[i, :], label='Mean')
+    #         flat_axs[i].plot(np.arange(0, min_len), min_curve[i, :], label='Min')
+    #         flat_axs[i].plot(np.arange(0, min_len), max_curve[i, :], label='Max')
+    #         flat_axs[i].set_ylim([-3, 3])
+    #         flat_axs[i].legend(fontsize=6)
+    #         flat_axs[i].set_title(f'Channel {i}', fontsize=6)
+    #     plt.show()
+    # else:
+    #     # example
+    #     fig, axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
+    #     flat_axs = axs.flatten()
+    #     for i in range(21):
+    #         # flat_axs[i].plot(np.arange(0, min_len), data[20, i, :], label='Mean')
+    #         # Graficar solo diferencias de cada canal para 1 ejemplo
+    #         flat_axs[i].plot(np.arange(0, len(diffs[20, i, :])), diffs[20, i, :], label='Diff')
+    #         flat_axs[i].set_ylim([-3, 3])
+    #         flat_axs[i].legend(fontsize=6)
+    #         flat_axs[i].set_title(f'Channel {i}', fontsize=6)
+    #     plt.show()
