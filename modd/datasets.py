@@ -112,6 +112,23 @@ class EegDatasetNominal(EegDatasetBase):
     
     def __len__(self):
         return len(self.columns)
+    
+class EegDatasetConvulsions(EegDatasetBase):
+    def __init__(self, transform=None):
+        super().__init__(transform)
+        # Dejar solo las columnas donde exista al menos un 1
+        self.columns = self.labels.loc[:, (self.labels == 1).any(axis=0)].columns
+        
+    def my_item(self, idx): # Cambio de nombre por problemas del hook con la clase base
+        idx = int(self.columns[idx])-1
+        return super().item(idx)
+    
+    def __getitem__(self, idx):
+        idx = int(self.columns[idx])-1
+        return super().__getitem__(idx)
+    
+    def __len__(self):
+        return len(self.columns)
 
 class TransformerDataset(Dataset):
     # Chunk de datos de tamaño in_size, con step de tamaño step
@@ -133,9 +150,8 @@ class TransformerDataset(Dataset):
         scaler.fit(data.T)
         joblib.dump(scaler, os.path.join(self.pwd, 'scaler.pkl'))
         
-    def setup(self, force = False):
+    def setup(self, force = False, path = 'data'):
         # Data path
-        path = 'data'
         self.data_path = os.path.join(self.pwd, path)
         # Crear carpeta data si no existe
         if not os.path.exists(self.data_path):
@@ -158,7 +174,7 @@ class TransformerDataset(Dataset):
                 for i in range(0, sample.shape[1] - self.in_size - self.out_size + 1, self.step):
                     sx = sample[:, i:i + self.in_size].astype('float32')
                     sy = sample[:, i + self.in_size:i + self.in_size + self.out_size].astype('float32')
-                    if sx.var(axis=0).mean() < 0.01 or sy.var(axis=0).mean() < 0.01: continue
+                    if sx.var(axis=0).mean() < 0.01: continue
                     s = np.concatenate([sx, sy], axis=1)
                     mean = np.mean(s, axis=1)
                     std = np.std(s, axis=1)
@@ -193,7 +209,7 @@ class EegDataModule(pl.LightningDataModule):
         self.pwd = os.path.dirname(os.path.abspath(__file__))
         self.partition = partition
         
-    def setup(self, stage: str = None, force = False, force_scaler=False):
+    def setup(self, stage: str = None, force = False, force_scaler=False, path = 'data'):
         transform =  transforms.Compose([transforms.ToTensor()])
         data = EegDatasetNominal(transform)
         train_data, val_data, test_data = random_split(data, self.partition, generator=Generator().manual_seed(42))
@@ -201,15 +217,15 @@ class EegDataModule(pl.LightningDataModule):
         
         self.train_dataset = TransformerDataset(train_data, self.in_size, self.out_size, self.step, 'train')
         if not os.path.exists(os.path.join(self.pwd, 'scaler.pkl')) or force_scaler: self.train_dataset.fit_scaler()
-        self.train_dataset.setup(force);
+        self.train_dataset.setup(force, path);
         # print('Train chunks:', len(self.train_dataset))
         
         self.val_dataset = TransformerDataset(val_data, self.in_size, self.out_size, self.step, 'val')
-        self.val_dataset.setup(force); 
+        self.val_dataset.setup(force, path)
         # print('Val chunks:', len(self.val_dataset))
         
         self.test_dataset = TransformerDataset(test_data, self.in_size, self.out_size, self.step, 'test')
-        self.test_dataset.setup(force)
+        self.test_dataset.setup(force, path)
         # print('Test chunks:', len(self.test_dataset))
         
     def train_dataloader(self):
@@ -222,7 +238,7 @@ class EegDataModule(pl.LightningDataModule):
         return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
     
 if __name__ == '__main__':
-    data = EegDataModule(batch_size=32, in_size=100, out_size=25, step=25, partition=[25, 4, 4])
+    data = EegDataModule(batch_size=32, in_size=100, out_size=1, step=1, partition=[25, 4, 4])
     # # Force para recalcular los datasets y el scaler
     data.setup(force=True, force_scaler=False)
     # Graficar un ejemplo
