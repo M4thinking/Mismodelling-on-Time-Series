@@ -43,19 +43,8 @@ def main(version=0, in_size=256, out_size=64, step=64):
     # Cantidad de parámetros
     print('Cantidad de parámetros: ', sum(p.numel() for p in model.parameters() if p.requires_grad))
     
-    x, y = dm.val_dataset[1]
-    x = x.unsqueeze(0).to(device)
-    y = y.unsqueeze(0).to(device)
-    # Test
-    y_hat = model(x)
-    print("Output size:", y_hat.shape)
-    print("Target size:", y.shape)
-    x = x.cpu().detach().numpy()
-    y = y.cpu().detach().numpy()
-    y_hat = y_hat.cpu().detach().numpy()
     
-    # Calcular métricas entre y_hat y y
-    # MSE
+    # Calcular metricas de rmse en el conjunto de entrenamiento, validacion y test
     def metrics(y_hat, y):
         mse = ((y_hat - y)**2).mean()
         mae = np.abs(y_hat - y).mean()
@@ -63,45 +52,76 @@ def main(version=0, in_size=256, out_size=64, step=64):
         rmse = np.sqrt(mse)
         y_bar = y.mean()
         r2 = 1 - ((y_hat - y)**2).sum() / ((y - y_bar)**2).sum()
+        print('MSE:', mse, 'MAE:', mae, 'MAPE:', mape, 'RMSE:', rmse, 'R2:', r2)
         return mse, mae, mape, rmse, r2
-    print('MSE:', metrics(y_hat, y)[0])
-    print('MAE:', metrics(y_hat, y)[1])
-    print('MAPE:', metrics(y_hat, y)[2])
-    print('RMSE:', metrics(y_hat, y)[3])
-    print('R2:', metrics(y_hat, y)[4])
+    
+    # Entrenamiento
+    model.eval()
+    train_loader = dm.train_dataloader()
+    val_loader = dm.val_dataloader()
+    test_loader = dm.test_dataloader()
+    # Train
+    y_hat = []
+    y = []
+    for x, y_ in tqdm.tqdm(train_loader):
+        y_hat.append(model(x.to(device)).cpu().detach().numpy())
+        y.append(y_.cpu().detach().numpy())
+    y_hat = np.concatenate(y_hat, axis=0)
+    y = np.concatenate(y, axis=0)
+    print('Train metrics:')
+    metrics(y_hat, y)
+    
+    # Val
+    y_hat = []
+    y = []
+    for x, y_ in tqdm.tqdm(val_loader):
+        y_hat.append(model(x.to(device)).cpu().detach().numpy())
+        y.append(y_.cpu().detach().numpy())
+    y_hat = np.concatenate(y_hat, axis=0)
+    y = np.concatenate(y, axis=0)
+    print('Val metrics:')
+    metrics(y_hat, y)
+
+    # Test
+    y_hat = []
+    y = []
+    for x, y_ in tqdm.tqdm(test_loader):
+        y_hat.append(model(x.to(device)).cpu().detach().numpy())
+        y.append(y_.cpu().detach().numpy())
+    y_hat = np.concatenate(y_hat, axis=0)
+    y = np.concatenate(y, axis=0)
+    print('Test metrics:')
+    metrics(y_hat, y)
     
     
-    # Crea una versión ruidosa de y y calcula las métricas para comparar
-    y_noisy = y + np.random.normal(0, 0.5, size=y.shape)
-    print('MSE:', metrics(y_noisy, y)[0])
-    print('MAE:', metrics(y_noisy, y)[1])
-    print('MAPE:', metrics(y_noisy, y)[2])
-    print('RMSE:', metrics(y_noisy, y)[3])
-    print('R2:', metrics(y_noisy, y)[4])
+    x, y = dm.val_dataset[1]
+    x = x.unsqueeze(0).to(device)
+    x_in = x.clone()
+    y = y.unsqueeze(0).to(device)
+    print('Input size:', x.shape)
+    print('Target size:', y.shape)
     
+    model.eval()
+
+    # Inferir, obtener la primera predicción, y concatenarla a la entrada para la siguiente predicción
+    y_hat =  torch.zeros((1, out_size, 21)).to(device)
+    for i in range(out_size):
+        y_hat[:, i, :] = model(x_in)[:, 0, :]
+        print(x_in[:, 1:, :].shape, 'device:', x_in[:, 1:, :].device)
+        x_in = torch.cat((x_in[:, 1:, :], y_hat[:, i, :].unsqueeze(1)), dim=1)
+    y_hat = torch.tensor(y_hat).to(device)
+
     # Graficar y y_hat
     _ , axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
     flat_axs = axs.flatten()
     for i in range(21):
-        flat_axs[i].plot(np.arange(0, in_size), x[0, :, i], label='Input')
-        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y[0, :, i], label='Target')
-        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y_hat[0, :, i], label='Output')
+        flat_axs[i].plot(np.arange(0, in_size), x[0, :, i].cpu().detach().numpy(), label='Input')
+        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y[0, :, i].cpu().detach().numpy(), label='Target')
+        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y_hat[0, :, i].cpu().detach().numpy(), label='Output')
         flat_axs[i].legend(fontsize=6)
         flat_axs[i].set_title(f'Channel {i}', fontsize=6)
     plt.show()
-    
-    examp = 0
-    
-    # Graficar y y_noisy
-    _ , axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
-    flat_axs = axs.flatten()
-    for i in range(21):
-        flat_axs[i].plot(np.arange(0, in_size), x[0, :, i], label='Input')
-        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y[0, :, i], label='Target')
-        flat_axs[i].plot(np.arange(in_size, in_size + out_size), y_noisy[0, :, i], label='Output')
-        flat_axs[i].legend(fontsize=6)
-        flat_axs[i].set_title(f'Channel {i}', fontsize=6)
-    plt.show()
+
 
 def plot_hist_var(in_size=256, out_size=64, step=64):
     dm = EegDataModule(batch_size=256, in_size=in_size, out_size=out_size, step=step)
@@ -117,21 +137,7 @@ def plot_hist_var(in_size=256, out_size=64, step=64):
     # Grafico de histograma de varianza
     plt.hist(var, bins=100)
     plt.show()
-    
-    # # Obtener el dato con menor varianza
-    # idx = np.argmin(var)
-    # x, y = train_dataset[idx]
-    
-    # # Graficar
-    # _ , axs = plt.subplots(7, 3, figsize=(15, 15), sharex=True, sharey=True)
-    # faxs = axs.flatten()
-    # for i in range(21):
-    #     faxs[i].plot(np.arange(0, in_size), x[:, i], label='Input')
-    #     faxs[i].plot(np.arange(in_size, in_size + out_size), y[:, i], label='Target')
-    #     faxs[i].legend()
-    #     faxs[i].set_title(f'Channel {i}', fontsize=6)
-    # plt.show()
 
 if __name__ == '__main__':
-    main(version=4, in_size=100, out_size=25, step=25)
+    main(version=2, in_size=100, out_size=25, step=25)
     # plot_hist_var(in_size=100, out_size=25, step=25)
