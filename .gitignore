@@ -166,3 +166,6 @@ References/
 *.zip
 *.pdf
 requirements.txt
+tst_logs/
+lightning_logs/
+transformer_data/
