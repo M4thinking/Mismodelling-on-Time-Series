@@ -7,7 +7,7 @@ import math
 torch.set_float32_matmul_precision('high')
 
 class Transformer(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1, max_length=256, channels=21, reduction=None):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1, max_length=256, channels=21, reduction=None, teacher_forcing=True):
         super(Transformer, self).__init__()
         self.embedding = nn.Linear(channels, d_model)
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
@@ -23,6 +23,7 @@ class Transformer(nn.Module):
         # Cambiar largo de secuencia de salida (Entrada/reduction) (ej: 256/4 = 64)
         self.avgpool = None if reduction is None else nn.AvgPool1d(reduction, stride=reduction)
         self.init_weights()
+        self.teacher_forcing = teacher_forcing
         
     def init_weights(self):
         # Inicializar pesos de la capa de embedding
@@ -78,6 +79,13 @@ class TransformerModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
+        # Teacher forcing
+        # if self.model.teacher_forcing:
+            # for _ in range(y.shape[1]):
+            #     y_hat = self.forward(x)[:, 0, :]
+            #     x = torch.cat((x[:, 1:, :], y_hat.unsqueeze(1)), dim=1)
+            # output = x[:, -y.shape[1]:, :]
+        # else:
         output = self.forward(x)
         loss = self.loss_function(output, y)
         self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -91,7 +99,7 @@ class TransformerModel(pl.LightningModule):
         return loss
         
     def configure_optimizers(self):
-        return optim.AdamW(self.parameters(), lr=self.learning_rate)
+        return optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-09, betas=(0.9, 0.98))
     
     # Scheduler
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
@@ -103,15 +111,13 @@ class TransformerModel(pl.LightningModule):
         #     for pg in optimizer.param_groups:
         #         pg['lr'] = lr_scale * self.learning_rate
         # # update params
-        
+        len_dataloader = 1842
         lr = self.hparams.learning_rate
-        step = epoch * len(self.train_dataloader()) + batch_idx
+        step = epoch * len_dataloader + batch_idx + 1
         warmup_steps = 4000
         lr = self.hparams.d_model**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-            
-            
         optimizer.step(closure=optimizer_closure)
     
     def predict_future(self, x, n_steps):

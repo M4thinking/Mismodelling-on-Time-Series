@@ -12,13 +12,13 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main(version=0):
     # Cargar datos
-    dm = EegDataModule(batch_size=256, in_size=100, out_size=25, step=25)
+    dm = EegDataModule(batch_size=64, in_size=100, out_size=25, step=25)
     # Entrenar
     best_model_path = f'tst_logs/transformer/version_{version}/checkpoints/'
-    hyperparams = {'d_model': 20,          # Dimensión de los embeddings
+    hyperparams = {'d_model': 40,          # Dimensión de los embeddings
                     'nhead': 4,             # Número de cabezas de atención en paralelo
                     'num_layers': 5,        # Número de capas de la red
-                    'dim_feedforward': 50, # Dimensión de la capa que sigue a la atención
+                    'dim_feedforward': 128, # Dimensión de la capa que sigue a la atención
                     'dropout': 0.2,         # Dropout
                     'learning_rate': 1e-4,  # Tasa de aprendizaje
                     'max_length': 100,      # Tamaño máximo de la secuencia de entrada
@@ -28,7 +28,7 @@ def main(version=0):
     if not os.path.exists(best_model_path):
         best_model_path = None
         # loss_fn = nn.L1Loss(reduction='sum') # MAE
-        model = TransformerModel(**hyperparams, loss_fn=nn.MSELoss(reduction='sum')).to(device); print('Modelo creado')
+        model = TransformerModel(**hyperparams, loss_fn=nn.L1Loss()).to(device); print('Modelo creado')
     else:
         best_model_path += [f for f in os.listdir(best_model_path) if '.ckpt' in f][0]
         model = TransformerModel.load_from_checkpoint(best_model_path); print('Modelo cargado desde: ', best_model_path)
@@ -47,9 +47,9 @@ def main(version=0):
         LearningRateMonitor(logging_interval='step')
     ]
     # Entrenar o cargar modelo
-    trainer = pl.Trainer(max_epochs=120, logger=logger, callbacks=callbacks, accelerator='gpu', log_every_n_steps=1)
+    trainer = pl.Trainer(max_epochs=1, logger=logger, callbacks=callbacks, accelerator='gpu', log_every_n_steps=1)
     print('Entrenando...'); trainer.fit(model, dm, ckpt_path=best_model_path)
     
         
 if __name__ == '__main__':
-    main(version=4) # V0/1 es 256/64, V2 es 100/25, V3 es 100/25 tamañao medio, V4 es 100/25 tamaño ultra pequeño
+    main(version=6) # V0/1 es 256/64, V2 es 100/25, V3 es 100/25 tamañao medio, V4 es 100/25 tamaño ultra pequeño
